@@ -11,6 +11,13 @@ SELECT 3 MODES
 
 Press `1`, `2`, or `3` to enter a mode.
 
+## Blinking input cursor
+
+The LCD hardware cursor blinks at the next character position whenever operand
+input is required. It is hidden on the startup/menu pages and while displaying
+results or errors. It is also hidden after selecting unary NOT or square because
+those operations wait for `#` rather than another operand.
+
 ## Common keys
 
 | Key | Function |

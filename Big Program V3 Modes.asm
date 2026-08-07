@@ -203,6 +203,7 @@ LOGIC_BINARY_OPERATOR:  CLR C
     LJMP NEXT_OPERAND
 
 HASH_EXECUTE: ; Execute the selected operation on #
+    LCALL LCD_CURSOR_OFF          ; Input is complete while showing the answer
     MOV A, #'='
     LCALL LCD_DATA
     JB 20H.0, EQUALS_SHOW
@@ -212,8 +213,10 @@ EQUALS_SHOW:            LCALL DISPLAY_RESULT
     LJMP CALC_LOOP
 UNKNOWN_KEY:            LJMP CALC_LOOP
 NEXT_OPERAND:           MOV R7, #01H
+    LCALL LCD_CURSOR_ON           ; Blink at the start of operand 2
     LJMP CALC_LOOP
 UNARY_PENDING:          MOV R7, #02H
+    LCALL LCD_CURSOR_OFF          ; Unary operation only needs #, not more input
     LJMP CALC_LOOP
 ; MODE, CLEAR AND ANS STATE
 RESET_STATE: ; Clear operands, operator, flags and error code
@@ -235,6 +238,7 @@ RESET_STATE: ; Clear operands, operator, flags and error code
 SHOW_STARTUP: ; Show READY once, then open the mode menu
     MOV MODE, #00H
     LCALL RESET_STATE
+    LCALL LCD_CURSOR_OFF          ; READY is a message, not an input field
     MOV A, #01H
     LCALL LCD_CMD
     MOV A, #0C5H
@@ -247,6 +251,7 @@ SHOW_STARTUP: ; Show READY once, then open the mode menu
 SHOW_MODE_MENU: ; Display the three selectable calculator modes
     MOV MODE, #00H
     LCALL RESET_STATE
+    LCALL LCD_CURSOR_OFF          ; Hide cursor while selecting a mode
     MOV A, #01H
     LCALL LCD_CMD
     MOV DPTR, #STR_SELECT_MODES
@@ -285,7 +290,8 @@ STATUS_LOGICAL:         CJNE A, #02H, STATUS_ADDITIONAL
 STATUS_ADDITIONAL:      MOV DPTR, #STR_ADDITIONAL
 PRINT_MODE_STATUS:      LCALL LCD_PUTS
     MOV A, #LCD_LINE1
-    LJMP LCD_CMD
+    LCALL LCD_CMD
+    LJMP LCD_CURSOR_ON            ; Operand 1 is now required
 
 CLEAR_CURRENT: ; Clear the current expression without changing mode
     LCALL RESET_STATE
@@ -382,6 +388,14 @@ LCD_CLEAR_L2_LOOP:      MOV A, #' '
     MOV A, #LCD_LINE2
     LCALL LCD_CMD
     RET
+
+LCD_CURSOR_ON: ; Show the hardware cursor and keep it blinking at input position
+    MOV A, #00FH                 ; Display on, cursor on, cursor blink on
+    LJMP LCD_CMD
+
+LCD_CURSOR_OFF: ; Hide the cursor while showing menus, results or errors
+    MOV A, #00CH                 ; Display on, cursor off, cursor blink off
+    LJMP LCD_CMD
 
 ; LCD TIMING DELAYS
 LCD_POWER_DELAY: ; Wait for the LCD power supply to settle
@@ -902,6 +916,7 @@ SET_ERROR: ; Set the shared arithmetic error flag
     RET
 ; RESULT AND ERROR DISPLAY
 DISPLAY_RESULT: ; Send a valid result to LCD line 2
+    LCALL LCD_CURSOR_OFF          ; Do not blink over the completed expression
     JB 20H.0, DISPLAY_ERROR
     MOV A, MODE
     CJNE A, #02H, DISPLAY_DECIMAL_RESULT
@@ -913,6 +928,7 @@ RESULT_DISPLAYED:
     RET
 
 DISPLAY_ERROR: ; Select and print the active error message
+    LCALL LCD_CURSOR_OFF          ; Error text is output, not an input prompt
     LCALL LCD_CLEAR_LINE2
     MOV A, ERROR_CODE
     CJNE A, #01H, ERR_CHK_ZERO
@@ -1052,7 +1068,7 @@ NORMAL_SYMBOLS: DB '+', '-', '*', '/'
 LOGIC_SYMBOLS:  DB '&', '|', 'X'
 STR_READY:          DB 'READY', 00H
 STR_ANS:            DB 'ANS', 00H
-STR_SELECT_MODES:   DB 'SELECT 3 MODES', 00H
+STR_SELECT_MODES:   DB 'MODES SELECTION', 00H
 STR_MODE_MENU:      DB '1:AR 2:LOG 3:ADD', 00H
 STR_ARITHMETIC:     DB 'ARITHMETIC', 00H
 STR_LOGICAL:        DB 'LOGIC: 0/1 ONLY', 00H
