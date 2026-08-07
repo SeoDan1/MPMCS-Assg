@@ -1,6 +1,5 @@
 ; ==============================================================================
 ; 8051 CALCULATOR - REQUIREMENT-COMPLETE VERSION 2
-; Hardware: 4x4 keypad on P1, 16x2 HD44780-compatible LCD
 ; LCD data: P3.0-P3.7 | RS=P2.0 | RW=P2.1 | EN=P2.2
 ;
 ; KEYS
@@ -52,6 +51,9 @@ MUL1        EQU 40H             ; MULTIPLIER HIGH BYTE: high byte of second fact
 ERROR_CODE  EQU 41H             ; ERROR CODE: selects the LCD error message
 DIV_OVER    EQU 42H             ; DIVISION OVERFLOW BIT: temporary 17th remainder bit
 DIGIT_COUNT EQU 43H             ; DIGIT COUNT: decimal characters awaiting display
+LCD_LINE1   EQU 080H            ; LCD LINE 1 COMMAND: first DDRAM address of row 1
+LCD_LINE2   EQU 0C0H            ; LCD LINE 2 COMMAND: first DDRAM address of row 2
+LCD_WIDTH   EQU 10H             ; LCD WIDTH: sixteen visible characters per row
 
 ; Error codes
 ; 01H = overflow, 03H = divide by zero
@@ -67,6 +69,11 @@ DIGIT_COUNT EQU 43H             ; DIGIT COUNT: decimal characters awaiting displ
 MAIN:
     MOV SP, #5FH                 ; Stack uses 60H upward, away from variables
     MOV P1, #0FFH
+    MOV P3, #00H                 ; Known LCD data-bus state during power-up
+    CLR P2.0                     ; RS=0
+    CLR P2.1                     ; RW=0
+    CLR P2.2                     ; EN=0 before the first LCD transaction
+    LCALL LCD_POWER_DELAY        ; Physical LCD requires a power-on settling time
     LCALL LCD_INIT
     LCALL CLEAR_ALL
 
@@ -76,9 +83,9 @@ CALC_LOOP:
     LJMP CALC_LOOP
 
 PROCESS_KEY:
-    PUSH ACC
+    PUSH ACC ;stack acc data
     LCALL WAIT_KEY_RELEASE
-    POP ACC
+    POP ACC ;load acc data back
 
     ; * toggles the next-page/shifted keypad layer.
     CJNE A, #0EH, CHECK_SHIFTED_DIGIT
@@ -246,7 +253,7 @@ NEXT_OPERAND:
     LJMP CALC_LOOP
 
 ; ==============================================================================
-; CLEAR CALCULATOR AND PREPARE BOTH LCD LINES
+; CLEAR CALCULATOR AND PREPARE BOTH LCD LINES (Group2)
 ; ==============================================================================
 CLEAR_ALL:
     MOV R2, #00H
@@ -271,7 +278,7 @@ CLEAR_ALL:
     LCALL LCD_PUTS
     LCALL READY_DELAY
     LCALL LCD_CLEAR_LINE2
-    MOV A, #080H
+    MOV A, #LCD_LINE1
     LCALL LCD_CMD
     RET
 
@@ -332,9 +339,18 @@ PREPARE_OPERATOR_DONE:
     RET
 
 ; ==============================================================================
-; LCD DRIVER AND TWO-LINE TEXT OUTPUT
+; LCD DRIVER AND TWO-LINE TEXT OUTPUT (Group 2)
 ; ==============================================================================
 LCD_INIT:
+    ; Standard physical-controller wake-up sequence. Force 8-bit mode three
+    ; times before selecting the final 8-bit, two-line configuration.
+    MOV A, #030H
+    LCALL LCD_CMD
+    LCALL LCD_DELAY              ; First wake-up command needs the longest gap
+    MOV A, #030H
+    LCALL LCD_CMD
+    MOV A, #030H
+    LCALL LCD_CMD
     MOV A, #038H                 ; 8-bit interface, 2 lines, 5x8 font
     LCALL LCD_CMD
     MOV A, #00CH                 ; Display on, cursor and blink off
@@ -377,14 +393,14 @@ LCD_PUTS_DONE:
     RET
 
 LCD_CLEAR_LINE2:
-    MOV A, #0C0H
+    MOV A, #LCD_LINE2
     LCALL LCD_CMD
-    MOV R0, #16
+    MOV R0, #LCD_WIDTH
 LCD_CLEAR_L2_LOOP:
     MOV A, #' '
     LCALL LCD_DATA
     DJNZ R0, LCD_CLEAR_L2_LOOP
-    MOV A, #0C0H
+    MOV A, #LCD_LINE2
     LCALL LCD_CMD
     RET
 
@@ -396,6 +412,23 @@ LCD_SCROLL_LEFT:
 LCD_SCROLL_RIGHT:
     MOV A, #01CH                 ; HD44780 display-shift-right command
     LCALL LCD_CMD
+    RET
+
+; ==============================================================================
+; LCD Timing Delay (Group 2)
+; ==============================================================================
+LCD_POWER_DELAY:
+    ; Approximately 40 ms at 11.0592/12 MHz. This delay occurs only at reset,
+    ; before the first LCD function-set command.
+    PUSH 00H
+    PUSH 01H
+    MOV R0, #80
+LCD_POWER_D_OUTER:
+    MOV R1, #255
+    DJNZ R1, $
+    DJNZ R0, LCD_POWER_D_OUTER
+    POP 01H
+    POP 00H
     RET
 
 SHORT_DELAY:
@@ -414,10 +447,10 @@ LCD_D_LOOP1:
     POP 01H
     POP 00H
     RET
-
+    
+; Delay for showing "Ready" on screen
 READY_DELAY:
     ; Roughly one second on a classic 12-clock 11.0592/12 MHz 8051.
-    ; Adjust the outer count if the target oscillator is substantially different.
     PUSH 00H
     PUSH 01H
     PUSH 02H
@@ -435,7 +468,7 @@ READY_D_MIDDLE:
     RET
 
 ; ==============================================================================
-; KEYPAD SCANNING AND DEBOUNCE
+; KEYPAD SCANNING AND DEBOUNCE (Group 1)
 ; ==============================================================================
 KEYPAD_SCAN:
     MOV P1, #0F0H                ; Rows low, columns released high
@@ -579,7 +612,8 @@ ACC_OP2:
     MOV R4, TMP_H
     MOV R5, TMP_L
     RET
-
+    
+; check if exceed 16bits
 MUL10_TMP_CHECK:
     ; Multiply TMP_H:TMP_L by 10. Return C=1 if it exceeds 16 bits.
     MOV A, TMP_L
@@ -969,11 +1003,11 @@ SET_ERROR:
     RET
 
 ; ==============================================================================
-; RESULT AND ERROR DISPLAY
+; RESULT AND ERROR DISPLAY (Group 2)
 ; ==============================================================================
 DISPLAY_RESULT:
     JB 20H.0, DISPLAY_ERROR
-    LCALL LCD_CLEAR_LINE2
+    ; LCD_PRINT_U16_RIGHT overwrites all 16 cells of line 2 itself.
     LCALL LCD_PRINT_U16_RIGHT
     SETB 20H.3                    ; Enable new-entry and ANS behavior
     RET
@@ -1010,8 +1044,15 @@ LCD_PRINT_U16_RIGHT:
     MOV A, TMP_H
     ORL A, TMP_L
     JNZ U16_CONVERT
-    MOV A, #0CFH                  ; Line 2, final character position
+    ; Start from C0H and write 15 spaces followed by zero. Beginning at the
+    ; line base is more reliable on physical LCD controller variants.
+    MOV A, #LCD_LINE2
     LCALL LCD_CMD
+    MOV R0, #0FH
+U16_ZERO_PAD:
+    MOV A, #' '
+    LCALL LCD_DATA
+    DJNZ R0, U16_ZERO_PAD
     MOV A, #'0'
     LCALL LCD_DATA
     RET
@@ -1027,18 +1068,28 @@ U16_DIVIDE_LOOP:
     ORL A, TMP_L
     JNZ U16_DIVIDE_LOOP
 
-    ; Cursor = line-2 base + (16 - digit count - optional minus sign).
+    ; Padding = 16 - digit count - optional minus sign. Always position the
+    ; cursor at C0H, then write the padding and value sequentially.
     MOV DIGIT_COUNT, R0
     MOV A, R0
     JNB 20H.2, U16_ALIGN_COUNT_READY
     INC A
 U16_ALIGN_COUNT_READY:
     MOV B, A
-    MOV A, #16
+    MOV A, #LCD_WIDTH
     CLR C
     SUBB A, B
-    ADD A, #0C0H
+    MOV R1, A                     ; Number of leading spaces
+    MOV A, #LCD_LINE2
     LCALL LCD_CMD
+
+    MOV A, R1
+    JZ U16_PADDING_DONE
+U16_PADDING_LOOP:
+    MOV A, #' '
+    LCALL LCD_DATA
+    DJNZ R1, U16_PADDING_LOOP
+U16_PADDING_DONE:
 
     JNB 20H.2, U16_PRINT_PREPARE
     MOV A, #'-'
