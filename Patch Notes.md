@@ -27,7 +27,7 @@ Stop Bit(s) (1 or 2 bits): The line returns to logic high (1) to signify packet 
 
 <img width="888" height="440" alt="image" src="https://github.com/user-attachments/assets/a752006c-0bc6-4c28-8e79-7a0b1bfb0fe1" />
 
-5. Pros and Cons
+**Pros and Cons**
 Pros: Simple hardware setup (only 2 signal wires), no clock wire required, supported by nearly all microcontrollers.
 Cons: Limited to 2 devices per line, slower than SPI/I²C, and sensitive to baud rate timing mismatches (clock drift >3% causes corrupted data).
 
