@@ -1,4 +1,5 @@
 Basically for this version, Part 1 and Part 2 is split from the combined code for Version 2.
+All functions are the same as the previous version using Daniel's Code.
 
 The communications method is now using UART for interconnect between 2 MCUs.
 
