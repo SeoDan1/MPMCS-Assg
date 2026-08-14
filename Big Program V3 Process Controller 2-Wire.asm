@@ -73,7 +73,7 @@ TX_BYTE     EQU 47H
 ; R2:R3 = operand 1/result, R4:R5 = operand 2
 ; R6 = operator, R7 = 0 operand 1 / 1 operand 2 / 2 unary locked
 ; 20H.0 error, 20H.1 star pending, 20H.2 negative magnitude
-; 20H.3 result displayed
+; 20H.3 result displayed, 20H.4 current operand has an accepted digit
 
     ORG 0000H
     LJMP MAIN
@@ -140,6 +140,14 @@ CHECK_ACTUAL_CLEAR:
 CHECK_DIGIT:
     CJNE A, #0AH, $ + 3
     JNC CHECK_OPERATOR
+    ; Reject non-binary digits before START_NEW_ENTRY so they are a complete
+    ; no-op even when a previous result is still displayed.
+    MOV A, MODE
+    CJNE A, #02H, CHECK_DIGIT_LOCK
+    MOV A, DIGIT_TMP
+    CJNE A, #02H, $ + 3
+    JNC IGNORE_BINARY_DIGIT
+CHECK_DIGIT_LOCK:
     CJNE R7, #02H, DIGIT_NOT_LOCKED
     LJMP CALC_LOOP               ; Unary NOT/square only waits for #
 DIGIT_NOT_LOCKED:
@@ -149,8 +157,6 @@ DIGIT_ENTRY_READY:
     MOV A, MODE
     CJNE A, #02H, STORE_DECIMAL_DIGIT
     MOV A, DIGIT_TMP
-    CJNE A, #02H, $ + 3
-    JNC INVALID_BINARY_DIGIT
     LCALL ACCUMULATE_BINARY
     SJMP CHECK_DIGIT_RESULT
 
@@ -159,13 +165,15 @@ STORE_DECIMAL_DIGIT:
     LCALL ACCUMULATE_DIGIT
 CHECK_DIGIT_RESULT:
     JB 20H.0, DIGIT_ERROR
+    SETB 20H.4                   ; Distinguishes an entered zero from no digit
     MOV A, DIGIT_TMP             ; Display controller echoes the digit
     LCALL SEND_BYTE
     LJMP CALC_LOOP
 
-INVALID_BINARY_DIGIT:
-    MOV ERROR_CODE, #07H
-    LCALL SET_ERROR
+IGNORE_BINARY_DIGIT:
+    ; Logical operands accept only 0 and 1. Keys 2-9 are silently ignored;
+    ; they do not alter the operand, display, or error state.
+    LJMP CALC_LOOP
 DIGIT_ERROR:
     ; Show the digit that caused an input-size error before reporting it.
     MOV A, ERROR_CODE
@@ -258,6 +266,7 @@ UNKNOWN_KEY:
     LJMP CALC_LOOP
 NEXT_OPERAND:
     MOV R7, #01H
+    CLR 20H.4                    ; Awaiting the first digit of operand 2
     LJMP CALC_LOOP
 UNARY_PENDING:
     MOV R7, #02H
@@ -278,6 +287,7 @@ RESET_STATE:
     CLR 20H.1
     CLR 20H.2
     CLR 20H.3
+    CLR 20H.4
     RET
 
 SHOW_MODE_MENU:
@@ -334,6 +344,9 @@ PREPARE_OPERATOR_ENTRY:
     JB 20H.0, PREPARE_OPERATOR_DONE
     JB 20H.3, PREPARE_OPERATOR_USE_ANS
     CJNE R7, #01H, PREPARE_OPERATOR_DONE
+    JNB 20H.4, PREPARE_OPERATOR_DONE
+    ; A second operand exists: calculate the chain and continue from ANS.
+    ; With no second-operand digit, the next operator only replaces the old one.
     LCALL EXECUTE_MATH
     JB 20H.0, PREPARE_OPERATOR_ERROR
     SETB 20H.3

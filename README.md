@@ -21,3 +21,19 @@ The current display-controller LCD wiring is:
 
 Read `V3 two-wire REQ-ACK guide.md` for the complete wiring and timing details.
 Each HEX has a matching `.asm` source and `.lst` assembly listing.
+
+## Current display behavior
+
+- Mode 3 is named `ADVANCE` and appears as `3:ADV` in the menu.
+- A non-exact division is shown as a mixed fraction. For example, `13 / 4`
+  displays `3⌟1⌟4`, meaning quotient 3, remainder 1, divisor 4.
+- An exact division continues to display only its integer quotient.
+- If a decimal input exceeds 65535, the digit that caused the overflow remains
+  visible on expression line 1 before `ERROR:INPUT SIZE` appears on line 2.
+- In logical mode, a full `8-bit operator 8-bit =` expression is retained even
+  though it is 18 characters long. Press `4` for its leftmost 16-character
+  window and `6` for its rightmost 16-character window. Line 2 is not moved.
+- Logical-mode digit keys `2-9` are silently ignored. Only `0` and `1` are
+  accepted as operand digits; `ERROR:USE 0/1` is no longer displayed.
+- Pressing another binary operator before operand 2 begins replaces the old
+  operator. For example, `1+-` displays `1-` instead of `ANS-`.
