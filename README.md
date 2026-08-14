@@ -17,6 +17,9 @@ sent by the process controller is acknowledged by the display controller with
 - Cursor is hidden during each line-2 redraw and restored to line 1 afterward.
 - Consecutive binary operators replace one another: `1+-` displays `1-`.
 - Logical digits `2–9` are silently ignored; only `0` and `1` enter operands.
+- NOT remains a postfix unary operation when executed with `#`. Before `#`, it
+  participates in operator replacement: `11`, `NOT`, `OR` displays `11 OR`
+  without creating an intermediate `ANS`.
 - Keys `4` and `6` manually select logical-expression windows when an equation
   exceeds the LCD's 16-character width.
 - Non-exact division uses a mixed-fraction display such as `3⌟1⌟4`.
@@ -131,8 +134,8 @@ key `4` selects the left window and key `6` selects the right window.
 |---|---|---|
 | Mode title | Static | Continuously scrolls right |
 | Logical title | `LOGIC: 0/1 ONLY` | `8bit LOGIC` |
-| Invalid Logical digits | Shows `ERROR:USE 0/1` | Digits `2–9` are ignored |
-| Consecutive operators | `1+-` displays `ANS-` | `1+-` displays `1-` |
+| Invalid Logical digits | Digits `2–9` are ignored | Same as updated Project 04 |
+| Consecutive operators | `1+-` displays `1-` | Same as updated Project 04 |
 | Cursor during line-2 redraw | Not applicable | Hidden, then restored to line 1 |
 | Logical keys `4` and `6` | Manual expression windows | Unchanged |
 | Division and fractions | Mixed-fraction support | Unchanged |
