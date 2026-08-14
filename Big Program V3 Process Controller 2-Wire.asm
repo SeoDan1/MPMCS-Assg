@@ -343,10 +343,19 @@ PREPARE_ANS_DONE:
 PREPARE_OPERATOR_ENTRY:
     JB 20H.0, PREPARE_OPERATOR_DONE
     JB 20H.3, PREPARE_OPERATOR_USE_ANS
+    CJNE R7, #02H, PREPARE_OPERATOR_CHECK_BINARY
+    ; NOT behaves like a replaceable logical operator until # is pressed.
+    ; Therefore, "11 NOT OR" becomes "11 OR" without creating ANS.
+    ; Square remains a calculated unary chain when another operator follows.
+    MOV A, R6
+    CJNE A, #08H, PREPARE_OPERATOR_EXECUTE_CHAIN
+    SJMP PREPARE_OPERATOR_DONE
+PREPARE_OPERATOR_CHECK_BINARY:
     CJNE R7, #01H, PREPARE_OPERATOR_DONE
     JNB 20H.4, PREPARE_OPERATOR_DONE
     ; A second operand exists: calculate the chain and continue from ANS.
     ; With no second-operand digit, the next operator only replaces the old one.
+PREPARE_OPERATOR_EXECUTE_CHAIN:
     LCALL EXECUTE_MATH
     JB 20H.0, PREPARE_OPERATOR_ERROR
     SETB 20H.3

@@ -37,3 +37,6 @@ Each HEX has a matching `.asm` source and `.lst` assembly listing.
   accepted as operand digits; `ERROR:USE 0/1` is no longer displayed.
 - Pressing another binary operator before operand 2 begins replaces the old
   operator. For example, `1+-` displays `1-` instead of `ANS-`.
+- NOT remains a postfix unary operation when executed with `#`. Before `#`, it
+  participates in operator replacement: `11`, `NOT`, `OR` displays `11 OR`
+  without creating an intermediate `ANS`.

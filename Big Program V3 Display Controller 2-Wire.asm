@@ -233,11 +233,8 @@ DISPLAY_ONE_OPERATOR:
     MOV DPTR, #OPERATOR_SYMBOLS
     MOVC A, @A+DPTR
     MOV RX_BYTE, A
-    MOV A, BIT_TEMP
-    CJNE A, #EV_OP_NOT, DISPLAY_BINARY_OPERATOR
-    CLR 20H.1                  ; NOT is unary, so it is never replaceable
-    SJMP DISPLAY_APPEND_OPERATOR
-DISPLAY_BINARY_OPERATOR:
+    ; NOT is unary when # executes it, but before then it replaces and is
+    ; replaced by other logical operators just like a binary operator.
     JNB 20H.1, DISPLAY_NEW_BINARY_OPERATOR
     MOV A, DISPLAY_MODE
     CJNE A, #02H, DISPLAY_REPLACE_NORMAL_OPERATOR
