@@ -1,0 +1,1273 @@
+; 8051 CALCULATOR V3 - PROCESS CONTROLLER, UART TWO-WIRE LINK
+; Controller 1 owns the 4x4 keypad, input validation, calculator state,
+; ALU operations, and error detection.  It does not drive the LCD.
+
+; ==============================
+; 		DECLARATIONS & EQU
+; ==============================
+EV_OP_ADD      EQU 0C0H
+EV_OP_SUB      EQU 0C1H
+EV_OP_MUL      EQU 0C2H
+EV_OP_DIV      EQU 0C3H
+EV_OP_AND      EQU 0C4H
+EV_OP_OR       EQU 0C5H
+EV_OP_XOR      EQU 0C6H
+EV_OP_NOT      EQU 0C7H
+EV_OP_SQUARE   EQU 0C8H
+EV_OP_POWER    EQU 0C9H         
+EV_OP_SQRT     EQU 0CAH         
+EV_CREDITS     EQU 0CBH         ; NEW: Credits screen trigger
+EV_OP_BASE     EQU 0BFH         
+EV_RESULT_DEC  EQU 0D0H
+EV_RESULT_BIN  EQU 0D1H
+EV_ERROR       EQU 0D2H
+EV_RESULT_REM  EQU 0D3H          ; Quotient and remainder result
+EV_STARTUP     EQU 0E0H
+EV_MODE_AR     EQU 0E1H
+EV_MODE_LOG    EQU 0E2H
+EV_MODE_ADV    EQU 0E3H
+EV_CLEAR       EQU 0E4H
+EV_MENU        EQU 0E5H
+EV_ANS         EQU 0E6H
+EV_EQUALS      EQU 0E7H
+EV_SCROLL_LEFT EQU 0E8H
+EV_SCROLL_RIGHT EQU 0E9H
+EV_BACKSPACE	EQU 0EAH
+EV_BACKSPACE_ANS EQU 0EBH       ; Delete the complete ANS token
+EV_POWER_OFF    EQU 0ECH        ; LCD off while process waits for DEL
+EV_BS_SHOW_OP   EQU 0EDH        ; Backspace exposed an operator
+EV_BS_REMOVE_OP EQU 0EEH        ; Backspace removed an operator
+
+; ==============================
+; 		RAM ALLOCATIONS
+; ==============================
+DIGIT_TMP   EQU 30H
+TMP_H       EQU 31H
+TMP_L       EQU 32H
+QUO_H       EQU 33H
+QUO_L       EQU 34H
+REM_H       EQU 35H
+REM_L       EQU 36H
+MC0         EQU 37H
+MC1         EQU 38H
+MC2         EQU 39H
+MC3         EQU 3AH
+PROD0       EQU 3BH
+PROD1       EQU 3CH
+PROD2       EQU 3DH
+PROD3       EQU 3EH
+MUL0        EQU 3FH
+MUL1        EQU 40H
+ERROR_CODE  EQU 41H
+DIV_OVER    EQU 42H
+MODE        EQU 44H
+OP1_BITS    EQU 45H
+OP2_BITS    EQU 46H
+TX_BYTE     EQU 47H
+
+; R2:R3 = operand 1/result, R4:R5 = operand 2
+; R6 = operator, R7 = 0 operand 1 / 1 operand 2 / 2 unary locked
+; 20H.0 error, 20H.1 star pending, 20H.2 negative magnitude
+; 20H.3 equals/result lock, 20H.4 current operand has an accepted digit
+; 20H.5 operand 1 is the complete ANS token
+; 20H.6 dedicated backspace lock after '='
+; 20H.7 software power-off state
+
+; ==============================
+; 	MAIN LOOP & KEY DISPATCHER
+; ==============================
+    ORG 0000H
+    LJMP MAIN
+
+MAIN:
+    MOV SP, #5FH
+    MOV P1, #0FFH               
+    MOV P2, #0FFH               
+    SETB P3.0                   
+    SETB P3.1                   
+    LCALL UART_INIT
+    MOV MODE, #00H
+    LCALL RESET_STATE
+    SETB 20H.7                 ; Start off; DEL performs the first power-on
+
+CALC_LOOP:
+    JB 20H.7, POWER_OFF_WAIT
+    JNB P2.0, DO_BACKSPACE
+	LCALL KEYPAD_SCAN
+    CJNE A, #0FFH, PROCESS_KEY
+    LJMP CALC_LOOP
+
+DO_BACKSPACE:
+	MOV A, MODE
+	JNZ DO_ACTIVE_MODE_BACKSPACE
+	LCALL HANDLE_POWER_KEY
+	LJMP CALC_LOOP
+DO_ACTIVE_MODE_BACKSPACE:
+	LCALL HANDLE_BACKSPACE
+	LJMP CALC_LOOP
+
+POWER_OFF_WAIT:
+    JB P2.0, POWER_OFF_WAIT      ; While off, only DEL is monitored
+    LCALL HANDLE_POWER_KEY
+    LJMP CALC_LOOP
+	
+PROCESS_KEY:
+    PUSH ACC
+    LCALL WAIT_KEY_RELEASE
+    POP ACC
+    MOV DIGIT_TMP, A
+
+    MOV A, MODE
+    JNZ ACTIVE_MODE_KEY
+    MOV A, DIGIT_TMP
+    LCALL SELECT_MODE
+    LJMP CALC_LOOP
+
+ACTIVE_MODE_KEY:
+    JNB 20H.1, CHECK_CLEAR_KEY
+    CLR 20H.1
+    MOV A, DIGIT_TMP
+    CJNE A, #0FH, CHECK_CLEAR_KEY
+    LCALL SHOW_MODE_MENU
+    LJMP CALC_LOOP
+
+CHECK_CLEAR_KEY:
+    MOV A, MODE
+    CJNE A, #02H, CHECK_ACTUAL_CLEAR
+    MOV A, DIGIT_TMP
+    CJNE A, #04H, CHECK_SCROLL_RIGHT
+    MOV A, #EV_SCROLL_LEFT
+    LCALL SEND_BYTE
+    LJMP CALC_LOOP
+CHECK_SCROLL_RIGHT:
+    CJNE A, #06H, CHECK_ACTUAL_CLEAR
+    MOV A, #EV_SCROLL_RIGHT
+    LCALL SEND_BYTE
+    LJMP CALC_LOOP
+CHECK_ACTUAL_CLEAR:
+    MOV A, DIGIT_TMP
+    CJNE A, #0EH, CHECK_DIGIT
+    LCALL CLEAR_CURRENT
+    SETB 20H.1
+    LJMP CALC_LOOP
+
+CHECK_DIGIT:
+    CJNE A, #0AH, $ + 3
+    JNC CHECK_OPERATOR
+    MOV A, MODE
+    CJNE A, #02H, CHECK_DIGIT_LOCK
+    MOV A, DIGIT_TMP
+    CJNE A, #02H, $ + 3
+    JNC IGNORE_BINARY_DIGIT
+CHECK_DIGIT_LOCK:
+    JNB 20H.5, CHECK_UNARY_DIGIT_LOCK
+    CJNE R7, #00H, CHECK_UNARY_DIGIT_LOCK
+    LJMP CALC_LOOP               ; Do not append a number directly to ANS
+CHECK_UNARY_DIGIT_LOCK:
+    CJNE R7, #02H, DIGIT_NOT_LOCKED
+    LJMP CALC_LOOP               
+DIGIT_NOT_LOCKED:
+    JNB 20H.3, DIGIT_ENTRY_READY
+    LCALL START_NEW_ENTRY
+DIGIT_ENTRY_READY:
+    MOV A, MODE
+    CJNE A, #02H, STORE_DECIMAL_DIGIT
+    MOV A, DIGIT_TMP
+    LCALL ACCUMULATE_BINARY
+    SJMP CHECK_DIGIT_RESULT
+
+STORE_DECIMAL_DIGIT:
+    MOV A, DIGIT_TMP
+    LCALL ACCUMULATE_DIGIT
+CHECK_DIGIT_RESULT:
+    JB 20H.0, DIGIT_ERROR
+    SETB 20H.4                   
+    MOV A, DIGIT_TMP             
+    LCALL SEND_BYTE
+    LJMP CALC_LOOP
+
+IGNORE_BINARY_DIGIT:
+    LJMP CALC_LOOP
+DIGIT_ERROR:
+    MOV A, ERROR_CODE
+    CJNE A, #04H, CHECK_BIT_COUNT_ECHO
+    SJMP ECHO_EXCEEDED_DIGIT
+CHECK_BIT_COUNT_ECHO:
+    CJNE A, #08H, SEND_DIGIT_ERROR
+ECHO_EXCEEDED_DIGIT:
+    MOV A, DIGIT_TMP
+    LCALL SEND_BYTE
+SEND_DIGIT_ERROR:
+    LCALL SEND_ERROR
+    LJMP CALC_LOOP
+
+CHECK_OPERATOR:
+    MOV A, DIGIT_TMP
+    CJNE A, #0FH, CHECK_MODE_OPERATOR
+    JNB 20H.3, HASH_EXECUTE
+    LJMP CALC_LOOP
+
+HASH_EXECUTE:
+    MOV A, R7
+    CJNE A, #01H, HASH_OPERANDS_READY
+    JNB 20H.4, HASH_IGNORE_INCOMPLETE
+HASH_OPERANDS_READY:
+    MOV A, #EV_EQUALS
+    LCALL SEND_BYTE
+    SETB 20H.3                    ; Lock backspace immediately after '='
+    SETB 20H.6
+    JB 20H.0, EQUALS_SHOW_ERROR
+    MOV ERROR_CODE, #00H
+    LCALL EXECUTE_MATH
+    JB 20H.0, EQUALS_SHOW_ERROR
+    LCALL SEND_RESULT
+    LJMP CALC_LOOP
+	
+EQUALS_SHOW_ERROR:
+    LCALL SEND_ERROR
+    LJMP CALC_LOOP
+HASH_IGNORE_INCOMPLETE:
+    LJMP CALC_LOOP
+
+CHECK_MODE_OPERATOR:
+    CJNE A, #0EH, $ + 3
+    JC MODE_OPERATOR_IN_RANGE
+    LJMP UNKNOWN_KEY
+MODE_OPERATOR_IN_RANGE:
+    MOV A, MODE
+    CJNE A, #03H, PREPARE_MODE_OPERATOR
+    MOV A, DIGIT_TMP
+    CJNE A, #0AH, CHK_ADV_B
+    SJMP PREPARE_MODE_OPERATOR   
+CHK_ADV_B:
+    CJNE A, #0BH, CHK_ADV_C
+    SJMP PREPARE_MODE_OPERATOR
+CHK_ADV_C:
+    CJNE A, #0CH, CHK_ADV_D
+    SJMP PREPARE_MODE_OPERATOR
+CHK_ADV_D:
+    CJNE A, #0DH, ADDITIONAL_UNKNOWN
+    SJMP PREPARE_MODE_OPERATOR
+ADDITIONAL_UNKNOWN:
+    LJMP UNKNOWN_KEY
+
+PREPARE_MODE_OPERATOR:
+    LCALL PREPARE_OPERATOR_ENTRY
+    JNB 20H.0, DECODE_MODE_OPERATOR
+    LJMP CALC_LOOP
+
+DECODE_MODE_OPERATOR:
+    MOV A, MODE
+    CJNE A, #01H, CHECK_LOGIC_MODE
+    MOV A, DIGIT_TMP
+    CLR C
+    SUBB A, #09H                
+    MOV R6, A
+    MOV A, R6
+    ADD A, #EV_OP_BASE
+    LCALL SEND_BYTE
+    SJMP NEXT_OPERAND
+
+CHECK_LOGIC_MODE:
+    CJNE A, #02H, DECODE_ADV_MODE
+    MOV A, DIGIT_TMP
+    CJNE A, #0DH, LOGIC_BINARY_OPERATOR
+    MOV R6, #08H
+    MOV A, #EV_OP_NOT
+    LCALL SEND_BYTE
+    SJMP UNARY_PENDING
+
+DECODE_ADV_MODE:
+    MOV A, DIGIT_TMP
+    CJNE A, #0AH, ADV_CHK_B
+    ; Mode 3 Key A = Square
+    MOV R6, #09H
+    MOV A, #EV_OP_SQUARE
+    LCALL SEND_BYTE
+    SJMP UNARY_PENDING
+ADV_CHK_B:
+    CJNE A, #0BH, ADV_CHK_C
+    ; Mode 3 Key B = Power 
+    MOV R6, #0AH
+    MOV A, #EV_OP_POWER
+    LCALL SEND_BYTE
+    SJMP NEXT_OPERAND
+ADV_CHK_C:
+    CJNE A, #0CH, ADV_CHK_D
+    ; Mode 3 Key C = Sqrt
+    MOV R6, #0BH
+    MOV A, #EV_OP_SQRT
+    LCALL SEND_BYTE
+    SJMP UNARY_PENDING
+ADV_CHK_D:
+    CJNE A, #0DH, ADDITIONAL_UNKNOWN
+    ; Mode 3 Key D = Credits Easter Egg
+    LCALL RESET_STATE          ; Prevent ALU desync by dropping memory buffer
+    MOV A, #EV_CREDITS
+    LCALL SEND_BYTE
+    LJMP CALC_LOOP
+
+LOGIC_BINARY_OPERATOR:
+    CLR C
+    SUBB A, #05H                
+    MOV R6, A
+    MOV A, R6
+    ADD A, #EV_OP_BASE
+    LCALL SEND_BYTE
+    SJMP NEXT_OPERAND
+
+UNKNOWN_KEY:
+    LJMP CALC_LOOP
+NEXT_OPERAND:
+    MOV R7, #01H
+    CLR 20H.4                    
+    LJMP CALC_LOOP
+UNARY_PENDING:
+    MOV R7, #02H
+    LJMP CALC_LOOP
+
+HANDLE_BACKSPACE:
+    ; Wait for button release (debounce)
+    JNB P2.0, $
+    LCALL DEBOUNCE_DELAY
+
+    ; The completed equation is read-only until a new entry begins.
+    JNB 20H.6, BACKSPACE_ALLOWED
+    LCALL CLEAR_CURRENT           ; After '=', backspace behaves as Clear
+    SETB 20H.1                    ; Preserve the normal Clear/menu sequence
+    RET
+BACKSPACE_ALLOWED:
+
+    ; --- CHECK UNARY OPERATOR LOCK (R7 = 2) ---
+    MOV A, R7
+    CJNE A, #02H, CHECK_OP2_STATE
+	; Backspace Unary Operator (SQRT or Square)
+    MOV R6, #00H                ; Clear active unary operator
+    MOV R7, #00H                ; Return to OP1 mode
+	; Preserve digit acceptance flag if OP1 (R2:R3) holds a value
+    MOV A, R2
+    ORL A, R3
+    JZ UNARY_BS_NO_DIGIT
+    SETB 20H.4
+    LJMP SEND_BACKSPACE_REMOVE_OPERATOR
+
+UNARY_BS_NO_DIGIT:
+    CLR 20H.4
+    LJMP SEND_BACKSPACE_REMOVE_OPERATOR
+	
+CHECK_OP2_STATE:
+    CJNE R7, #01H, BACKSPACE_OP1_CHECK
+
+    ; --- BACKSPACE OP2 ---
+    MOV A, MODE
+    CJNE A, #02H, OP2_DECIMAL_BS
+
+    ; OP2 Binary Backspace (Mode 2)
+    MOV A, OP2_BITS
+    JZ BACKSPACE_OPERATOR       ; 0 bits left -> erase operator instead
+    DEC OP2_BITS
+    CLR C
+    MOV A, R5
+    RRC A
+    MOV R5, A
+    MOV A, OP2_BITS
+    JNZ OP2_BINARY_BS_SEND
+    CLR 20H.4
+    LJMP SEND_BACKSPACE_SHOW_OPERATOR
+OP2_BINARY_BS_SEND:
+    SJMP SEND_BACKSPACE_EVENT
+
+OP2_DECIMAL_BS:
+    MOV TMP_H, R4
+    MOV TMP_L, R5
+    MOV A, TMP_H
+    ORL A, TMP_L
+    JZ BACKSPACE_OPERATOR
+    LCALL DIV_TMP_BY_10
+    MOV R4, TMP_H
+    MOV R5, TMP_L
+    MOV A, R4
+    ORL A, R5
+    JNZ OP2_DECIMAL_BS_SEND
+    CLR 20H.4
+    LJMP SEND_BACKSPACE_SHOW_OPERATOR
+OP2_DECIMAL_BS_SEND:
+    SJMP SEND_BACKSPACE_EVENT
+
+BACKSPACE_OPERATOR:
+    MOV R6, #00H
+    MOV R7, #00H
+	; Maintain digit flag if OP1 holds a value
+    MOV A, R2
+    ORL A, R3
+    JZ OP_BS_NO_DIGIT
+    SETB 20H.4
+	SJMP SEND_BACKSPACE_REMOVE_OPERATOR
+	
+OP_BS_NO_DIGIT:
+    CLR 20H.4
+	SJMP SEND_BACKSPACE_REMOVE_OPERATOR
+
+BACKSPACE_OP1_CHECK:
+    CJNE R7, #00H, BACKSPACE_DONE
+    JB 20H.5, BACKSPACE_ANS_TOKEN
+
+    ; --- BACKSPACE OP1 ---
+    MOV A, MODE
+    CJNE A, #02H, OP1_DECIMAL_BS
+
+    ; OP1 Binary Backspace (Mode 2)
+    MOV A, OP1_BITS
+    JZ BACKSPACE_DONE           ; 0 bits left -> nothing to erase
+    DEC OP1_BITS
+    CLR C
+    MOV A, R3
+    RRC A
+    MOV R3, A
+    SJMP SEND_BACKSPACE_EVENT
+
+OP1_DECIMAL_BS:
+    MOV TMP_H, R2
+    MOV TMP_L, R3
+    MOV A, TMP_H
+    ORL A, TMP_L
+    JZ BACKSPACE_DONE
+    LCALL DIV_TMP_BY_10
+    MOV R2, TMP_H
+    MOV R3, TMP_L
+
+    SJMP SEND_BACKSPACE_EVENT
+
+BACKSPACE_ANS_TOKEN:
+    ; ANS is one operand, so request one atomic token deletion.
+    CLR 20H.5
+    CLR 20H.2
+    CLR 20H.4
+    MOV R2, #00H
+    MOV R3, #00H
+    MOV REM_H, #00H
+    MOV REM_L, #00H
+    MOV OP1_BITS, #00H
+    MOV A, #EV_BACKSPACE_ANS
+    LJMP SEND_BYTE
+
+SEND_BACKSPACE_EVENT:
+    MOV A, #EV_BACKSPACE
+    LCALL SEND_BYTE
+    SJMP BACKSPACE_DONE
+
+SEND_BACKSPACE_SHOW_OPERATOR:
+    MOV A, #EV_BS_SHOW_OP
+    LCALL SEND_BYTE
+    SJMP BACKSPACE_DONE
+
+SEND_BACKSPACE_REMOVE_OPERATOR:
+    MOV A, #EV_BS_REMOVE_OP
+    LCALL SEND_BYTE
+
+BACKSPACE_DONE:
+    RET
+
+HANDLE_POWER_KEY:
+    ; Debounce DEL before toggling the mode-menu power state.
+    JNB P2.0, $
+    LCALL DEBOUNCE_DELAY
+    JB 20H.7, POWER_ON_RESTART
+POWER_OFF:
+    SETB 20H.7
+    MOV A, #EV_POWER_OFF
+    LJMP SEND_BYTE
+POWER_ON_RESTART:
+    CLR 20H.7
+    MOV MODE, #00H
+    LCALL RESET_STATE
+    MOV A, #EV_STARTUP
+    LJMP SEND_BYTE
+
+; =========================================================
+; HELPER: Divide 16-bit value (TMP_H:TMP_L) by 10
+; Returns quotient in TMP_H:TMP_L (drops the last digit)
+; =========================================================
+DIV_TMP_BY_10:
+    MOV QUO_H, #00H
+    MOV QUO_L, #00H
+    MOV REM_L, #00H
+    MOV R1, #16
+DIV10_BS_LOOP:
+    CLR C
+    MOV A, TMP_L
+    RLC A
+    MOV TMP_L, A
+    MOV A, TMP_H
+    RLC A
+    MOV TMP_H, A
+    MOV A, REM_L
+    RLC A
+    MOV REM_L, A
+    CLR C
+    MOV A, QUO_L
+    RLC A
+    MOV QUO_L, A
+    MOV A, QUO_H
+    RLC A
+    MOV QUO_H, A
+    MOV A, REM_L
+    CLR C
+    SUBB A, #10
+    JC DIV10_BS_LESS
+    MOV REM_L, A
+    ORL QUO_L, #01H
+DIV10_BS_LESS:
+    DJNZ R1, DIV10_BS_LOOP
+    MOV TMP_H, QUO_H
+    MOV TMP_L, QUO_L
+    RET
+	
+; ================================
+; STATE, MODES, AND DISPLAY EVENTS
+; ================================
+RESET_STATE:
+    MOV R2, #00H
+    MOV R3, #00H
+    MOV R4, #00H
+    MOV R5, #00H
+    MOV R6, #00H
+    MOV R7, #00H
+    MOV ERROR_CODE, #00H
+    MOV OP1_BITS, #00H
+    MOV OP2_BITS, #00H
+    CLR 20H.0
+    CLR 20H.1
+    CLR 20H.2
+    CLR 20H.3
+    CLR 20H.4
+    CLR 20H.5
+    CLR 20H.6
+    RET
+
+SHOW_MODE_MENU:
+    MOV MODE, #00H
+    LCALL RESET_STATE
+    MOV A, #EV_MENU
+    LJMP SEND_BYTE
+
+SELECT_MODE:
+    CJNE A, #01H, SELECT_MODE_2
+    MOV MODE, #01H
+    MOV DIGIT_TMP, #EV_MODE_AR
+    SJMP MODE_SELECTED
+SELECT_MODE_2:
+    CJNE A, #02H, SELECT_MODE_3
+    MOV MODE, #02H
+    MOV DIGIT_TMP, #EV_MODE_LOG
+    SJMP MODE_SELECTED
+SELECT_MODE_3:
+    CJNE A, #03H, SELECT_MODE_DONE
+    MOV MODE, #03H
+    MOV DIGIT_TMP, #EV_MODE_ADV
+MODE_SELECTED:
+    LCALL RESET_STATE
+    MOV A, DIGIT_TMP
+    LJMP SEND_BYTE
+SELECT_MODE_DONE:
+    RET
+
+CLEAR_CURRENT:
+    LCALL RESET_STATE
+    MOV A, #EV_CLEAR
+    LJMP SEND_BYTE
+
+START_NEW_ENTRY:
+    LJMP CLEAR_CURRENT
+
+PREPARE_ANS_EXPRESSION:
+    JNB 20H.3, PREPARE_ANS_DONE
+    MOV R4, #00H
+    MOV R5, #00H
+    MOV R6, #00H
+    MOV R7, #00H
+	MOV REM_H, #00H
+	MOV REM_L, #00H
+    MOV ERROR_CODE, #00H
+    MOV OP2_BITS, #00H
+    CLR 20H.0
+    CLR 20H.3
+    CLR 20H.6                    ; A new ANS operation unlocks backspace
+    SETB 20H.5                    ; Process and display now track ANS as a token
+    MOV A, #EV_ANS
+    LCALL SEND_BYTE
+PREPARE_ANS_DONE:
+    RET
+
+PREPARE_OPERATOR_ENTRY:
+    JB 20H.0, PREPARE_OPERATOR_DONE
+    JB 20H.3, PREPARE_OPERATOR_USE_ANS
+    CJNE R7, #02H, PREPARE_OPERATOR_CHECK_BINARY
+    MOV A, R6
+    CJNE A, #08H, PREPARE_OPERATOR_EXECUTE_CHAIN
+    SJMP PREPARE_OPERATOR_DONE
+PREPARE_OPERATOR_CHECK_BINARY:
+    CJNE R7, #01H, PREPARE_OPERATOR_DONE
+    JNB 20H.4, PREPARE_OPERATOR_DONE
+PREPARE_OPERATOR_EXECUTE_CHAIN:
+    LCALL EXECUTE_MATH
+    JB 20H.0, PREPARE_OPERATOR_ERROR
+    SETB 20H.3
+PREPARE_OPERATOR_USE_ANS:
+    LCALL PREPARE_ANS_EXPRESSION
+    RET
+PREPARE_OPERATOR_ERROR:
+    LCALL SEND_ERROR
+PREPARE_OPERATOR_DONE:
+    RET
+	
+; ============================================
+; HARDWARE UART TRANSFER TO DISPLAY CONTROLLER
+; ============================================
+UART_INIT:
+    ANL TMOD, #0FH              
+    ORL TMOD, #020H             
+    ANL PCON, #07FH             
+    MOV TH1, #0FDH              
+    MOV TL1, #0FDH
+    MOV SCON, #050H             
+    CLR TI
+    CLR RI
+    SETB TR1
+    RET
+
+SEND_BYTE:
+    MOV TX_BYTE, A
+    CLR TI
+    MOV SBUF, A
+SEND_WAIT_TX:
+    JNB TI, SEND_WAIT_TX
+    CLR TI
+SEND_WAIT_ACK:
+    JNB RI, SEND_WAIT_ACK
+    MOV A, SBUF
+    CLR RI
+    CJNE A, #006H, SEND_WAIT_ACK
+    MOV A, TX_BYTE
+    RET
+
+SEND_ERROR:
+    MOV A, #EV_ERROR
+    LCALL SEND_BYTE
+    MOV A, ERROR_CODE
+    LJMP SEND_BYTE
+
+SEND_RESULT:
+    MOV A, MODE
+    CJNE A, #02H, SEND_DECIMAL_RESULT
+    MOV A, #EV_RESULT_BIN
+    LCALL SEND_BYTE
+    MOV A, R3
+    LJMP SEND_BYTE
+SEND_DECIMAL_RESULT:
+    MOV A, R6
+    CJNE A, #04H, SEND_PLAIN_DECIMAL
+    MOV A, #EV_RESULT_REM
+    LCALL SEND_BYTE
+    MOV A, #00H
+    JNB 20H.2, SEND_REMAINDER_SIGN
+    INC A
+SEND_REMAINDER_SIGN:
+    LCALL SEND_BYTE
+    MOV A, R2
+    LCALL SEND_BYTE
+    MOV A, R3
+    LCALL SEND_BYTE
+    MOV A, REM_H
+    LCALL SEND_BYTE
+    MOV A, REM_L
+    LJMP SEND_BYTE
+SEND_PLAIN_DECIMAL:
+    MOV A, #EV_RESULT_DEC
+    LCALL SEND_BYTE
+    MOV A, #00H
+    JNB 20H.2, SEND_RESULT_SIGN
+    INC A
+SEND_RESULT_SIGN:
+    LCALL SEND_BYTE
+    MOV A, R2
+    LCALL SEND_BYTE
+    MOV A, R3
+    LJMP SEND_BYTE
+
+; ==============================
+;  KEYPAD SCANNING AND DEBOUNCE
+; ==============================
+KEYPAD_SCAN:
+    MOV P1, #0F0H
+    MOV A, P1
+    ANL A, #0F0H
+    CJNE A, #0F0H, KEY_FOUND
+    MOV A, #0FFH
+    RET
+KEY_FOUND:
+    LCALL DEBOUNCE_DELAY
+    MOV P1, #0F0H
+    MOV A, P1
+    ANL A, #0F0H
+    CJNE A, #0F0H, SCAN_ROW_0
+    MOV A, #0FFH
+    RET
+SCAN_ROW_0:
+    MOV P1, #0FEH
+    MOV A, P1
+    JNB ACC.4, GOT_KEY_1
+    JNB ACC.5, GOT_KEY_2
+    JNB ACC.6, GOT_KEY_3
+    JNB ACC.7, GOT_KEY_A
+SCAN_ROW_1:
+    MOV P1, #0FDH
+    MOV A, P1
+    JNB ACC.4, GOT_KEY_4
+    JNB ACC.5, GOT_KEY_5
+    JNB ACC.6, GOT_KEY_6
+    JNB ACC.7, GOT_KEY_B
+SCAN_ROW_2:
+    MOV P1, #0FBH
+    MOV A, P1
+    JNB ACC.4, GOT_KEY_7
+    JNB ACC.5, GOT_KEY_8
+    JNB ACC.6, GOT_KEY_9
+    JNB ACC.7, GOT_KEY_C
+SCAN_ROW_3:
+    MOV P1, #0F7H
+    MOV A, P1
+    JNB ACC.4, GOT_KEY_STAR
+    JNB ACC.5, GOT_KEY_0
+    JNB ACC.6, GOT_KEY_HASH
+    JNB ACC.7, GOT_KEY_D
+    MOV A, #0FFH
+    RET
+GOT_KEY_0:     MOV A, #00H
+               RET
+GOT_KEY_1:     MOV A, #01H
+               RET
+GOT_KEY_2:     MOV A, #02H
+               RET
+GOT_KEY_3:     MOV A, #03H
+               RET
+GOT_KEY_4:     MOV A, #04H
+               RET
+GOT_KEY_5:     MOV A, #05H
+               RET
+GOT_KEY_6:     MOV A, #06H
+               RET
+GOT_KEY_7:     MOV A, #07H
+               RET
+GOT_KEY_8:     MOV A, #08H
+               RET
+GOT_KEY_9:     MOV A, #09H
+               RET
+GOT_KEY_A:     MOV A, #0AH
+               RET
+GOT_KEY_B:     MOV A, #0BH
+               RET
+GOT_KEY_C:     MOV A, #0CH
+               RET
+GOT_KEY_D:     MOV A, #0DH
+               RET
+GOT_KEY_STAR:  MOV A, #0EH
+               RET
+GOT_KEY_HASH:  MOV A, #0FH
+               RET
+
+WAIT_KEY_RELEASE:
+    MOV P1, #0F0H
+    MOV A, P1
+    ANL A, #0F0H
+    CJNE A, #0F0H, WAIT_KEY_RELEASE
+    LCALL DEBOUNCE_DELAY
+    RET
+
+DEBOUNCE_DELAY:
+    MOV R0, #20
+DEBOUNCE_OUTER:
+    MOV R1, #255
+    DJNZ R1, $
+    DJNZ R0, DEBOUNCE_OUTER
+    RET
+
+; ==============================
+; ACCUMULATOR & INPUT FORMATTING
+; ==============================
+ACCUMULATE_BINARY:
+    MOV DIGIT_TMP, A
+    CJNE R7, #00H, BINARY_OP2
+    MOV A, OP1_BITS
+    CJNE A, #08H, $ + 3
+    JNC BINARY_TOO_LONG
+    MOV A, R3
+    RL A
+    ORL A, DIGIT_TMP
+    MOV R3, A
+    MOV R2, #00H
+    INC OP1_BITS
+    RET
+BINARY_OP2:
+    MOV A, OP2_BITS
+    CJNE A, #08H, $ + 3
+    JNC BINARY_TOO_LONG
+    MOV A, R5
+    RL A
+    ORL A, DIGIT_TMP
+    MOV R5, A
+    MOV R4, #00H
+    INC OP2_BITS
+    RET
+BINARY_TOO_LONG:
+    MOV ERROR_CODE, #08H
+    LJMP SET_ERROR
+
+ACCUMULATE_DIGIT:
+    MOV DIGIT_TMP, A
+    CJNE R7, #00H, ACC_OP2
+    MOV TMP_H, R2
+    MOV TMP_L, R3
+    LCALL MUL10_TMP_CHECK
+    JC INPUT_TOO_LARGE
+    MOV A, TMP_L
+    ADD A, DIGIT_TMP
+    MOV TMP_L, A
+    MOV A, TMP_H
+    ADDC A, #00H
+    JC INPUT_TOO_LARGE
+    MOV TMP_H, A
+    MOV R2, TMP_H
+    MOV R3, TMP_L
+    RET
+ACC_OP2:
+    MOV TMP_H, R4
+    MOV TMP_L, R5
+    LCALL MUL10_TMP_CHECK
+    JC INPUT_TOO_LARGE
+    MOV A, TMP_L
+    ADD A, DIGIT_TMP
+    MOV TMP_L, A
+    MOV A, TMP_H
+    ADDC A, #00H
+    JC INPUT_TOO_LARGE
+    MOV TMP_H, A
+    MOV R4, TMP_H
+    MOV R5, TMP_L
+    RET
+
+MUL10_TMP_CHECK:
+    MOV A, TMP_L
+    MOV B, #10
+    MUL AB
+    MOV TMP_L, A
+    MOV REM_L, B
+    MOV A, TMP_H
+    MOV B, #10
+    MUL AB
+    MOV TMP_H, A
+    MOV A, B
+    JNZ MUL10_OVERFLOW
+    MOV A, TMP_H
+    ADD A, REM_L
+    MOV TMP_H, A
+    JC MUL10_OVERFLOW
+    CLR C
+    RET
+MUL10_OVERFLOW:
+    SETB C
+    RET
+INPUT_TOO_LARGE:
+    MOV ERROR_CODE, #04H
+    LJMP SET_ERROR
+
+; ==============================
+; 		ALU DISPATCHER
+; ==============================
+EXECUTE_MATH:
+    MOV A, R6
+    JZ NO_OPERATOR_SELECTED
+    CJNE A, #0CH, $ + 3         
+    JNC NO_OPERATOR_SELECTED
+    DEC A
+    MOV B, #03H
+    MUL AB
+    MOV DPTR, #ALU_JUMP_TABLE
+    JMP @A+DPTR
+NO_OPERATOR_SELECTED:
+    RET
+
+ALU_JUMP_TABLE:
+    LJMP MATH_ADD
+    LJMP MATH_SUB
+    LJMP MATH_MUL
+    LJMP MATH_DIV
+    LJMP LOGIC_AND
+    LJMP LOGIC_OR
+    LJMP LOGIC_XOR
+    LJMP LOGIC_NOT
+    LJMP MATH_SQUARE
+    LJMP MATH_POWER             
+    LJMP MATH_SQRT              
+
+; ==============================
+; 		MODE 1: ARITHMETIC
+; ==============================
+MATH_ADD:
+    JB 20H.2, ADD_TO_NEGATIVE_ANS
+    MOV A, R3
+    ADD A, R5
+    MOV R3, A
+    MOV A, R2
+    ADDC A, R4
+    MOV R2, A
+    JNC ADD_OK
+    LJMP ARITH_OVERFLOW
+ADD_OK:
+    RET
+ADD_TO_NEGATIVE_ANS:
+    MOV A, R4
+    CLR C
+    SUBB A, R2
+    JC ADD_NEG_MAG_LARGER
+    JNZ ADD_POS_MAG_LARGER
+    MOV A, R5
+    CLR C
+    SUBB A, R3
+    JC ADD_NEG_MAG_LARGER
+ADD_POS_MAG_LARGER:
+    CLR C
+    MOV A, R5
+    SUBB A, R3
+    MOV R3, A
+    MOV A, R4
+    SUBB A, R2
+    MOV R2, A
+    CLR 20H.2
+    RET
+ADD_NEG_MAG_LARGER:
+    CLR C
+    MOV A, R3
+    SUBB A, R5
+    MOV R3, A
+    MOV A, R2
+    SUBB A, R4
+    MOV R2, A
+    RET
+
+MATH_SUB:
+    JB 20H.2, SUB_FROM_NEGATIVE_ANS
+    MOV A, R2
+    CLR C
+    SUBB A, R4
+    JC SUB_RESULT_NEGATIVE
+    JNZ SUB_RESULT_POSITIVE
+    MOV A, R3
+    CLR C
+    SUBB A, R5
+    JC SUB_RESULT_NEGATIVE
+SUB_RESULT_POSITIVE:
+    CLR C
+    MOV A, R3
+    SUBB A, R5
+    MOV R3, A
+    MOV A, R2
+    SUBB A, R4
+    MOV R2, A
+    CLR 20H.2
+    RET
+SUB_RESULT_NEGATIVE:
+    CLR C
+    MOV A, R5
+    SUBB A, R3
+    MOV R3, A
+    MOV A, R4
+    SUBB A, R2
+    MOV R2, A
+    SETB 20H.2
+    RET
+SUB_FROM_NEGATIVE_ANS:
+    MOV A, R3
+    ADD A, R5
+    MOV R3, A
+    MOV A, R2
+    ADDC A, R4
+    MOV R2, A
+    JNC SUB_NEG_OK
+    LJMP ARITH_OVERFLOW
+SUB_NEG_OK:
+    RET
+
+MATH_MUL:
+    MOV MC0, R3
+    MOV MC1, R2
+    MOV MC2, #00H
+    MOV MC3, #00H
+    MOV MUL0, R5
+    MOV MUL1, R4
+    MOV PROD0, #00H
+    MOV PROD1, #00H
+    MOV PROD2, #00H
+    MOV PROD3, #00H
+    MOV R0, #16
+MUL16_LOOP:
+    MOV A, MUL0
+    ANL A, #01H
+    JZ MUL16_NO_ADD
+    CLR C
+    MOV A, PROD0
+    ADD A, MC0
+    MOV PROD0, A
+    MOV A, PROD1
+    ADDC A, MC1
+    MOV PROD1, A
+    MOV A, PROD2
+    ADDC A, MC2
+    MOV PROD2, A
+    MOV A, PROD3
+    ADDC A, MC3
+    MOV PROD3, A
+MUL16_NO_ADD:
+    CLR C
+    MOV A, MC0
+    RLC A
+    MOV MC0, A
+    MOV A, MC1
+    RLC A
+    MOV MC1, A
+    MOV A, MC2
+    RLC A
+    MOV MC2, A
+    MOV A, MC3
+    RLC A
+    MOV MC3, A
+    CLR C
+    MOV A, MUL1
+    RRC A
+    MOV MUL1, A
+    MOV A, MUL0
+    RRC A
+    MOV MUL0, A
+    DJNZ R0, MUL16_LOOP
+    MOV A, PROD2
+    ORL A, PROD3
+    JZ MUL16_VALID
+    LJMP ARITH_OVERFLOW
+MUL16_VALID:
+    MOV R2, PROD1
+    MOV R3, PROD0
+    MOV A, R2
+    ORL A, R3
+    JNZ MUL16_KEEP_SIGN
+    CLR 20H.2
+MUL16_KEEP_SIGN:
+    RET
+
+MATH_DIV:
+    MOV A, R4
+    ORL A, R5
+    JNZ DIVISOR_VALID
+    LJMP DIVIDE_BY_ZERO
+DIVISOR_VALID:
+    MOV TMP_H, R2
+    MOV TMP_L, R3
+    MOV QUO_H, #00H
+    MOV QUO_L, #00H
+    MOV REM_H, #00H
+    MOV REM_L, #00H
+    MOV R0, #16
+DIV16_LOOP:
+    CLR C
+    MOV A, TMP_L
+    RLC A
+    MOV TMP_L, A
+    MOV A, TMP_H
+    RLC A
+    MOV TMP_H, A
+    MOV A, REM_L
+    RLC A
+    MOV REM_L, A
+    MOV A, REM_H
+    RLC A
+    MOV REM_H, A
+    MOV DIV_OVER, #00H
+    JNC DIV16_NO_REM_OVER
+    MOV DIV_OVER, #01H
+DIV16_NO_REM_OVER:
+    CLR C
+    MOV A, QUO_L
+    RLC A
+    MOV QUO_L, A
+    MOV A, QUO_H
+    RLC A
+    MOV QUO_H, A
+    MOV A, DIV_OVER
+    JNZ DIV16_SUBTRACT
+    MOV A, REM_H
+    CLR C
+    SUBB A, R4
+    JC DIV16_LESS
+    JNZ DIV16_SUBTRACT
+    MOV A, REM_L
+    CLR C
+    SUBB A, R5
+    JC DIV16_LESS
+DIV16_SUBTRACT:
+    CLR C
+    MOV A, REM_L
+    SUBB A, R5
+    MOV REM_L, A
+    MOV A, REM_H
+    SUBB A, R4
+    MOV REM_H, A
+    ORL QUO_L, #01H
+DIV16_LESS:
+    DJNZ R0, DIV16_LOOP
+    MOV R2, QUO_H
+    MOV R3, QUO_L
+    MOV A, R2
+    ORL A, R3
+    JNZ DIV16_KEEP_SIGN
+    CLR 20H.2
+DIV16_KEEP_SIGN:
+    RET
+
+; ==============================
+; 		MODE 2: LOGIC
+; ==============================
+LOGIC_AND:
+    MOV A, R3
+    ANL A, R5
+    MOV R3, A
+    MOV R2, #00H
+    RET
+LOGIC_OR:
+    MOV A, R3
+    ORL A, R5
+    MOV R3, A
+    MOV R2, #00H
+    RET
+LOGIC_XOR:
+    MOV A, R3
+    XRL A, R5
+    MOV R3, A
+    MOV R2, #00H
+    RET
+LOGIC_NOT:
+    MOV A, R3
+    CPL A
+    MOV R3, A
+    MOV R2, #00H
+    RET
+
+; ==============================
+; 		MODE 3: ADVANCE
+; ==============================
+MATH_SQUARE:
+    MOV A, R2
+    MOV R4, A
+    MOV A, R3
+    MOV R5, A
+    CLR 20H.2
+    LCALL MATH_MUL
+    RET
+
+MATH_POWER:
+    MOV A, R4
+    ORL A, R5
+    JNZ POWER_START
+    MOV R2, #00H
+    MOV R3, #01H
+    RET
+POWER_START:
+    MOV 48H, R2             
+    MOV 49H, R3             
+POWER_LOOP:
+    MOV A, R4
+    ORL A, R5
+    DEC A
+    JZ POWER_DONE
+    MOV A, R5
+    JNZ P_DEC_L
+    DEC R4
+P_DEC_L:
+    DEC R5
+    PUSH 04H
+    PUSH 05H
+    MOV R4, 48H
+    MOV R5, 49H
+    LCALL MATH_MUL          
+    POP 05H
+    POP 04H
+    JB 20H.0, POWER_DONE
+    SJMP POWER_LOOP
+POWER_DONE:
+    RET
+
+MATH_SQRT:
+    MOV 48H, R2                 ; High byte of input
+    MOV 49H, R3                 ; Low byte of input
+    
+    ; Check if input is zero
+    MOV A, 48H
+    ORL A, 49H
+    JNZ SQRT_START
+    MOV R2, #00H
+    MOV R3, #00H
+    RET
+
+SQRT_START:
+    MOV R0, #00H
+
+SQRT_LOOP:
+    INC R0
+    MOV A, R0
+    MOV B, R0
+    MUL AB                      ; B = High byte, A = Low byte
+    MOV R4, B                   ; R4 = Square High
+    MOV R5, A                   ; R5 = Square Low
+    
+    ; 16-bit subtraction: Target (48H:49H) - Square (R4:R5)
+    CLR C
+    MOV A, 49H
+    SUBB A, R5                  ; Low byte subtract
+    MOV A, 48H
+    SUBB A, R4                  ; High byte subtract with carry
+    JC SQRT_OVERSHOOT           ; Borrow set -> Square > Target
+	MOV A, 48H
+    XRL A, R4
+    JNZ SQRT_LOOP               ; High byte > 0 -> Target > Square, continue
+	MOV A, 49H
+    XRL A, R5
+    JNZ SQRT_LOOP
+    SJMP SQRT_EXACT             ; Perfect match!
+
+SQRT_OVERSHOOT:
+    DEC R0                      ; Step back to largest integer root
+	MOV R2, #00H
+	MOV A, R0
+    MOV R3, A
+    CLR 20H.2
+	RET
+	
+SQRT_EXACT:
+    MOV R2, #00H
+	MOV A, R0
+    MOV R3, A
+    CLR 20H.2                   ; Positive result
+    RET
+
+; ==============================
+; 		ERROR DETECTION
+; ==============================
+ARITH_OVERFLOW:
+    MOV ERROR_CODE, #01H
+    LJMP SET_ERROR
+DIVIDE_BY_ZERO:
+    MOV ERROR_CODE, #03H
+    LJMP SET_ERROR
+SET_ERROR:
+    SETB 20H.0
+    RET
+
+    END
